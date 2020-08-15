@@ -12,13 +12,15 @@ import org.springframework.http.*;
 import org.springframework.stereotype.Service;
 import org.springframework.util.CollectionUtils;
 import org.springframework.util.StreamUtils;
-import org.springframework.util.StringUtils;
 import org.springframework.web.client.RestTemplate;
 
 import javax.annotation.PostConstruct;
-import java.io.*;
+import java.io.File;
 import java.nio.charset.Charset;
-import java.util.*;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
 /**
  * 通过gitlab Api自动下载gitLab上的所有项目
@@ -42,26 +44,47 @@ public class GitlabProjectCloneService {
 
     @PostConstruct
     private void start() {
+        try {
+            doStart();
+        } catch (Throwable e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void doStart() {
         File execDir = new File(projectDir);
         System.out.println("start get gitlab projects");
         List<GitGroup> groups = getGroups();
-        try {
-            System.out.println(objectMapper.writeValueAsString(groups));
-        } catch (JsonProcessingException e) {
-            e.printStackTrace();
-        }
         for (GitGroup group : groups) {
-            List<GitProject> projects = getProjectsByGroup(group.getName());
-            for (GitProject project : projects) {
-                String lastActivityBranchName = getLastActivityBranchName(project.getId());
-                if (StringUtils.isEmpty(lastActivityBranchName)) {
-                    System.out.println("branches is empty, break project...");
-                    continue;
+            try {
+                List<GitProject> projects = getProjectsByGroup(group);
+                for (GitProject project : projects) {
+                    List<GitBranch> branches = getBranches(project);
+                    String master  = getMasterBranch(branches);
+                    clone(master, project, execDir);
                 }
-                clone(lastActivityBranchName, project, execDir);
+            } catch (Throwable e) {
+                e.printStackTrace();
             }
         }
         System.out.println("end get gitlab projects");
+    }
+
+    private void printJson(Object obj){
+        try {
+            System.out.println(objectMapper.writeValueAsString(obj));
+        } catch (JsonProcessingException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private String getMasterBranch(List<GitBranch> branches) {
+        for (GitBranch gitBranch : branches) {
+            if("master".equals(gitBranch.getName())){
+                return gitBranch.getName();
+            }
+        }
+        return "";
     }
 
     /**
@@ -70,7 +93,7 @@ public class GitlabProjectCloneService {
      * @return
      */
     private List<GitProject> getAllProjects() {
-        String url = gitlabUrl + "/api/v3/projects?per_page={per_page}&private_token={private_token}";
+        String url = gitlabUrl + "/api/v4/projects?per_page={per_page}&private_token={private_token}";
         Map<String, String> uriVariables = new HashMap<>();
         uriVariables.put("per_page", "100");
         uriVariables.put("private_token", privateToken);
@@ -93,23 +116,23 @@ public class GitlabProjectCloneService {
      * @param group
      * @return
      */
-    private List<GitProject> getProjectsByGroup(String group) {
-        String url = gitlabUrl + "/api/v3/groups/{group}/projects?per_page={per_page}&private_token={private_token}";
+    private List<GitProject> getProjectsByGroup(GitGroup group) {
+        String url = gitlabUrl + "/api/v4/groups/{group}/projects?per_page=100";
         Map<String, String> uriVariables = new HashMap<>();
-        uriVariables.put("group", group);
-        uriVariables.put("per_page", "100");
-        uriVariables.put("private_token", privateToken);
+        uriVariables.put("group", String.valueOf(group.getId()));
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.set("PRIVATE-TOKEN", privateToken);
 
         HttpEntity entity = new HttpEntity<>(headers);
         ParameterizedTypeReference<List<GitProject>> responseType = new ParameterizedTypeReference<List<GitProject>>() {
         };
         ResponseEntity<List<GitProject>> responseEntity = restTemplate.exchange(url, HttpMethod.GET, entity, responseType, uriVariables);
         if (HttpStatus.OK == responseEntity.getStatusCode()) {
+            printJson(responseEntity.getBody());
             return responseEntity.getBody();
         }
-        return null;
+        return Collections.emptyList();
     }
 
     /**
@@ -118,7 +141,7 @@ public class GitlabProjectCloneService {
      * @return
      */
     private List<GitGroup> getGroups() {
-        String url = gitlabUrl + "/api/v3/groups?private_token={private_token}";
+        String url = gitlabUrl + "/api/v4/groups?private_token={private_token}";
         Map<String, String> uriVariables = new HashMap<>();
         uriVariables.put("private_token", privateToken);
         HttpHeaders headers = new HttpHeaders();
@@ -129,9 +152,10 @@ public class GitlabProjectCloneService {
         };
         ResponseEntity<List<GitGroup>> responseEntity = restTemplate.exchange(url, HttpMethod.GET, entity, responseType, uriVariables);
         if (HttpStatus.OK == responseEntity.getStatusCode()) {
+            printJson(responseEntity.getBody());
             return responseEntity.getBody();
         }
-        return null;
+        return Collections.emptyList();
     }
 
     /**
@@ -140,8 +164,8 @@ public class GitlabProjectCloneService {
      * @param projectId 项目ID
      * @return
      */
-    private String getLastActivityBranchName(Long projectId) {
-        List<GitBranch> branches = getBranches(projectId);
+    private String getLastActivityBranchName(GitProject project) {
+        List<GitBranch> branches = getBranches(project);
         if (CollectionUtils.isEmpty(branches)) {
             return "";
         }
@@ -156,10 +180,10 @@ public class GitlabProjectCloneService {
      * @param projectId 项目ID
      * @return
      */
-    private List<GitBranch> getBranches(Long projectId) {
-        String url = gitlabUrl + "/api/v3/projects/{projectId}/repository/branches?private_token={privateToken}";
+    private List<GitBranch> getBranches(GitProject project) {
+        String url = gitlabUrl + "/api/v4/projects/{projectId}/repository/branches?private_token={privateToken}";
         Map<String, Object> uriVariables = new HashMap<>();
-        uriVariables.put("projectId", projectId);
+        uriVariables.put("projectId", project.getId());
         uriVariables.put("privateToken", privateToken);
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
@@ -169,9 +193,10 @@ public class GitlabProjectCloneService {
         };
         ResponseEntity<List<GitBranch>> responseEntity = restTemplate.exchange(url, HttpMethod.GET, entity, responseType, uriVariables);
         if (HttpStatus.OK == responseEntity.getStatusCode()) {
+            printJson(responseEntity.getBody());
             return responseEntity.getBody();
         }
-        return null;
+        return Collections.emptyList();
     }
 
     /**
@@ -197,7 +222,7 @@ public class GitlabProjectCloneService {
             Process exec = Runtime.getRuntime().exec(command, null, execDir);
             exec.waitFor();
             String successResult = StreamUtils.copyToString(exec.getInputStream(), Charset.forName("UTF-8"));
-            String errorResult = StreamUtils.copyToString(exec.getErrorStream(),Charset.forName("UTF-8"));
+            String errorResult = StreamUtils.copyToString(exec.getErrorStream(), Charset.forName("UTF-8"));
             System.out.println("successResult: " + successResult);
             System.out.println("errorResult: " + errorResult);
             System.out.println("================================");
